@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-06
+
+### Changed
+- README: add "Status: research harness + MCP demo, not production" banner
+  upfront, "What it's good for" section (local agent swarms, prototyping
+  coordination patterns, validating the routing thesis), and "Current
+  limitations & roadmap" table (in-memory, HMAC secret, concurrency, true_tol,
+  auth/audit, tuning) — so developers see the author admit what it is and
+  isn't, building trust instead of overselling.
+- README: add `hmac_secret` to the integrity knobs table; mention `fork_reason`
+  and `hmac_failures` in the propose_update result.
+- README: add `python -m tests.test_router_unit` to the verification section.
+
 ## [0.3.0] - 2026-07-06
 
 ### Added
@@ -99,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the server preserves the router's behavior end-to-end.
 - Packaging for `uvx cascade-mcp` / PyPI (hatchling), MIT licensed.
 
-[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.1.0...v0.2.0

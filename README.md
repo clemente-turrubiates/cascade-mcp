@@ -10,6 +10,11 @@ router that decides, per conflict, whether a write **wins**, **forks** to a
 human, or must be **recomputed**, plus an MCP server that exposes the router as
 tools and a stress-test suite that proves the behavior can't be cherry-picked.
 
+> **Status: research harness + MCP demo, not production.** Good for
+> coordinating a local swarm of agents in a single session where losing state
+> on restart is acceptable. Persistence, auth, and multi-process serialization
+> come next — see [Current limitations & roadmap](#current-limitations--roadmap).
+
 ## Thesis
 
 **cascade is the cheap arm, not a correctness mechanism.** Correctness lives
@@ -111,10 +116,13 @@ The MCP server exposes five tools: `configure`, `read_state`, `propose_update`,
 | `tol_est_noise`           | 0.0     | log-normal spread on tolerance estimate (honest measurement)|
 | `trust_writer_tolerance`  | false   | let writers redefine `true_tol` at write time (the hole)    |
 | `audit_canary_prob`       | 0.0     | fraction of cascade commits that also run the OCC check     |
+| `hmac_secret`             | `""`    | secret for read-set HMAC; inject a real key to enforce integrity |
 
-`propose_update` results now surface `predicate_passed` (rev vs value),
-`configured_materiality`, `configured_true_tol`, `audit_check`, and
-`audit_disagreement` — so a caller can't be blind to which predicate cleared.
+`propose_update` results surface `predicate_passed` (rev vs value),
+`configured_materiality`, `configured_true_tol`, `audit_check`,
+`audit_disagreement`, `fork_reason` (FORK_CONF_TIE if a conf tie persisted
+after calibration), and `hmac_failures` — so a caller can't be blind to which
+predicate cleared or whether integrity checks failed.
 
 ## Usage (from source)
 
@@ -152,3 +160,47 @@ smoke test → regime grid through the wrapper → re-run the suite):
 ```
 python -m tests.test_mcp_wrapper
 ```
+
+Run the 13 unit tests for the router's decision logic (OCC/cascade/fork routing,
+HMAC enforcement, calibration, audit canary):
+
+```
+python -m tests.test_router_unit
+```
+
+## What it's good for
+
+- **Coordinating a local agent swarm in one session.** You driving 2-3 agents
+  through opencode/Claude Desktop on your machine. In-memory is fine — it's one
+  process, one session; restart just means re-running. Hybrid routing, FORK to
+  human, and the audit canary give you structured conflict outcomes instead of
+  last-writer-wins.
+- **Prototyping multi-agent coordination patterns.** Exploring when agents
+  should fork to a human vs recompute vs pick a winner — this lets you exercise
+  those arms through a real MCP interface without building the router yourself.
+- **Validating the routing thesis.** The sim (`cascade_routing.main`) runs 5
+  experiments quantifying each corruption path and the audit canary's detection
+  rate. The 43-check wrapper suite proves the MCP server preserves the router's
+  behavior. That's research output you can cite.
+
+## Current limitations & roadmap
+
+This is an **in-memory research harness**. The routing logic is tested and
+correct; the gaps are all in the deployment layer around the router, not in
+the router's decisions. Being explicit about them:
+
+| limitation | status | fix |
+| :--------- | :----- | :--- |
+| **In-memory only** — restart loses all state | known | add a persistence layer (SQLite/WAL + recovery); the router is pure, so backing it with a DB instead of a dict doesn't change the decisions |
+| **HMAC secret defaults to `""`** — integrity contract is enforced (present-but-wrong rejects), but no deployment has injected a real key | by design | `configure(hmac_secret=<real-key>)` — the router can't ship your secret |
+| **No concurrency control on the server** — `propose_update` batch accumulation is racy under parallel writers if you scale beyond one MCP process | known | MCP stdio serializes per-server; for multi-process, move pending-batch state to a lock or single-writer queue |
+| **`true_tol` is simulator-known** — in production you estimate it; noise >0 leaks silent errors | inherent | add per-field tolerance calibration from historical data; the router's contract is "given a tolerance, route" |
+| **No auth / durable audit log / quotas** | known | the audit canary counts in-memory; a deployment needs structured logging + alerting |
+| **`tol_safety` / `route_threshold` / `materiality` need real tuning** | defaults are research guesses | calibrate for your actual workload; the knobs are exposed so you can |
+
+**What's not on this list** (because it's done): the routing logic, the trust
+boundary (writer-asserted tolerance/confidence is advisory by default), the
+audit canary (observable without ground truth), the HMAC enforcement, the
+calibration mechanism, and the test suite (13 unit + 43 wrapper checks). The
+router's correctness is validated; production is a deployment project, not a
+router rewrite.
