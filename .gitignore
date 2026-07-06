@@ -1,0 +1,34 @@
+# Large simulation outputs (regenerable — run gen_agent_logs.py / test_mcp_wrapper.py)
+agent_logs.csv
+agent_logs_mcp.csv
+
+# Logs
+*.log
+gen_progress.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude / agent settings (local-only)
+.claude/

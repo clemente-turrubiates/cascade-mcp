@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: build + smoke test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-dependency-glob: pyproject.toml
+
+      - name: Build and install the wheel
+        run: |
+          uv build
+          uv pip install dist/*.whl
+          echo "${VIRTUAL_ENV}/bin" >> "$GITHUB_PATH"
+
+      - name: Import check
+        run: python -c "from cascade import cascade_routing, server, cascade_sim; print('imports OK')"
+
+      - name: MCP server boots and lists its tools
+        run: |
+          python - <<'PY'
+          import json, subprocess, sys
+          proc = subprocess.Popen(
+              ["cascade-mcp"],
+              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
+          )
+          send = lambda o: (proc.stdin.write(json.dumps(o) + "\n"), proc.stdin.flush())
+          send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                           "clientInfo": {"name": "ci", "version": "1"}}})
+          assert "serverInfo" in proc.stdout.readline()
+          send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+          send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+          tools = [t["name"] for t in json.loads(proc.stdout.readline())["result"]["tools"]]
+          proc.terminate()
+          print("tools:", tools)
+          assert {"configure", "read_state", "propose_update"} <= set(tools), tools
+          print("MCP smoke test OK")
+          PY
