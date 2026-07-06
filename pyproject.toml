@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cascade-mcp"
-version = "0.3.2"
+version = "0.3.3"
 description = "Cascade-resolution routing for concurrent multi-agent writes, exposed as an MCP server."
 readme = "README.md"
 requires-python = ">=3.10"

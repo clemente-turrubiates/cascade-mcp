@@ -5,10 +5,25 @@
 [![CI](https://github.com/clemente-turrubiates/cascade-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/clemente-turrubiates/cascade-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Cascade-resolution routing for concurrent multi-agent writes — a resolution
-router that decides, per conflict, whether a write **wins**, **forks** to a
-human, or must be **recomputed**, plus an MCP server that exposes the router as
-tools and a stress-test suite that proves the behavior can't be cherry-picked.
+A **write-conflict resolver** with a tunable staleness predicate and a
+self-detectable leak canary. Not an orchestration framework.
+
+It decides, per conflict, whether a write **wins**, **forks** to a human, or
+must be **recomputed**, plus an MCP server that exposes the router as tools and
+a stress-test suite that proves the behavior can't be cherry-picked.
+
+> **Anti-Hype Warning.** This is a precision tool for a narrow problem, not a
+> general-purpose orchestration framework. It is **not** for:
+> - Task/graph orchestration (use LangGraph, Temporal, Airflow)
+> - Agent conversation management (use AutoGen, CrewAI)
+> - Tool-use routing (that's the agent loop's job)
+> - Resource orchestration / load balancing
+>
+> It **is** for one thing: resolving concurrent writes to a shared store when
+> writes are expensive to redo, fields have genuine semantic tolerance, and
+> you want the conflict decision to be observable. If your problem reduces to
+> that, this is a clean, tested primitive for it. If it doesn't, use something
+> else — you'll be happier.
 
 > **Status: research harness + MCP demo, not production.** Good for
 > coordinating a local swarm of agents in a single session where losing state

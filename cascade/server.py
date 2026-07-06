@@ -273,15 +273,13 @@ async def propose_update_impl(
     state.pending.setdefault(field, []).append(w)
     batch = state.pending[field]
     if len(batch) < expected_writers:
-        logger.info("propose     %s agent=%s tier=%d conf=%.2f "
-                     "batch %d/%d (pending)",
+        logger.info("[PEND ] %s agent=%s tier=%d conf=%.2f batch %d/%d",
                      field, agent_id, authority_tier, confidence,
                      len(batch), expected_writers)
         return {"status": "pending", "field": field,
                 "received": len(batch), "expected": expected_writers}
     # batch complete -> resolve
-    logger.info("propose     %s agent=%s tier=%d conf=%.2f "
-                 "batch %d/%d (resolving)",
+    logger.info("[BATCH] %s agent=%s tier=%d conf=%.2f batch %d/%d resolving",
                  field, agent_id, authority_tier, confidence,
                  len(batch), expected_writers)
     # TRUST BOUNDARY: the writer's `tolerance` is advisory unless
@@ -319,9 +317,9 @@ async def propose_update_impl(
     else:
         n_stale = sum(
             1 for ww in batch if cr.drift(ww, state.fields) > f.materiality)
-    logger.info("resolve     %s arm=%s committed=%s silent=%d "
-                 "stale=%d/%d%s%s",
-                 field, arm, committed, silent, n_stale, len(batch),
+    logger.info("%s %s committed=%s silent=%d stale=%d/%d%s%s",
+                 _ARM_TAG.get(arm, f"[{arm:>4}]"),
+                 field, committed, silent, n_stale, len(batch),
                  f" fork_reason={fork_reason}" if fork_reason else "",
                  f" audit_disagree={audit_dis}" if audit_dis else "")
     # winner tier/conf
@@ -393,6 +391,16 @@ _ARM_PLAIN = {
     "RECOMPUTE":    "all writes stale, re-run needed",
     "OCC_COMMIT":   "OCC rev-check passed, committed",
     "OCC_ALLABORT": "OCC rev-check failed, all aborted",
+}
+
+# Short bracketed tags for log lines — instantly scannable in a terminal.
+# Distinct shapes per arm so the eye picks them out without reading.
+_ARM_TAG = {
+    "WINNER":       "[ WIN ]",
+    "FORK":         "[FORK ]",
+    "RECOMPUTE":    "[REDO ]",
+    "OCC_COMMIT":   "[OCC-C]",
+    "OCC_ALLABORT": "[OCC-X]",
 }
 
 _FORK_REASON_PLAIN = {

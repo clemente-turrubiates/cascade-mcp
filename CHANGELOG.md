@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-06
+
+### Added
+- **`examples/price_estimate_clash.py`**: 50-line killer example showing two
+  agents fighting over a `price_estimate` field. Agent A reads deps, starts a
+  5-minute reasoning chain. Background churn hits a source. Agent A proposes
+  with a stale read-set. OCC would abort A and waste the compute. Cascade's
+  value-predicate accepts A's answer because the dep drifted 0.3% — well within
+  the 5% tolerance. The entire value proposition in one runnable script.
+- **Anti-Hype Warning** in README: explicitly states this is NOT for task/graph
+  orchestration, conversation management, tool-use routing, or resource
+  orchestration. Lists what to use instead (LangGraph, Temporal, AutoGen).
+  Leads with "write-conflict resolver with a tunable staleness predicate," not
+  "multi-agent" framing.
+- **Visual arm tags in logs**: `[ WIN ]`, `[FORK ]`, `[REDO ]`, `[OCC-C]`,
+  `[OCC-X]` — distinct shapes so the eye picks them out without reading.
+  Propose logs use `[PEND ]` and `[BATCH]` for pending/resolving states.
+
+### Changed
+- Log format tightened: `read_state` line is more compact, `resolve` line
+  uses the arm tag instead of `arm=` prefix.
+
 ## [0.3.2] - 2026-07-06
 
 ### Added
@@ -137,7 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the server preserves the router's behavior end-to-end.
 - Packaging for `uvx cascade-mcp` / PyPI (hatchling), MIT licensed.
 
-[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.1...v0.3.0
