@@ -107,6 +107,14 @@ class CascadeState:
         # the two arms would disagree. Observable leak proxy WITHOUT
         # true_tol ground truth (mirrors cr.Config.audit_canary_prob).
         self.audit_canary_prob: float = 0.0
+        # HMAC secret for read-set integrity binding. Empty -> pass-through
+        # (missing HMAC accepted). A deployment injects a real key; a
+        # present-but-wrong HMAC then rejects the write (bad read-set).
+        self.hmac_secret: str = ""
+        # Per-agent calibration track record: agent_id -> (correct, total).
+        # Updated after each commit; _effective_conf blends asserted
+        # confidence with this record.
+        self.track: dict[str, tuple[int, int]] = {}
         self.rng: random.Random = random.Random(0)
 
     def reset(self) -> None:
@@ -114,6 +122,7 @@ class CascadeState:
         self.read_rev.clear()
         self.read_val.clear()
         self.pending.clear()
+        self.track.clear()
 
 
 state = CascadeState()
@@ -132,6 +141,7 @@ async def configure_impl(
     tol_est_noise: float = 0.0,
     trust_writer_tolerance: bool = False,
     audit_canary_prob: float = 0.0,
+    hmac_secret: str = "",
 ) -> dict:
     """Build the DAG exactly like cr.build, then store regime config."""
     state.rng = random.Random(seed)
@@ -150,6 +160,7 @@ async def configure_impl(
     state.tol_est_noise = tol_est_noise
     state.trust_writer_tolerance = bool(trust_writer_tolerance)
     state.audit_canary_prob = float(audit_canary_prob)
+    state.hmac_secret = hmac_secret
     state.reset()
     # build DAG (mirrors cr.build)
     by: list[list[str]] = []
@@ -238,7 +249,8 @@ async def propose_update_impl(
         read_rev = {d: state.fields[d].rev for d in f.deps}
         read_val = {d: state.fields[d].value for d in f.deps}
     w = cr.Write(tier=authority_tier, conf=confidence,
-                 read_rev=dict(read_rev), read_val=dict(read_val))
+                 read_rev=dict(read_rev), read_val=dict(read_val),
+                 agent_id=agent_id)
     state.pending.setdefault(field, []).append(w)
     batch = state.pending[field]
     if len(batch) < expected_writers:
@@ -268,8 +280,11 @@ async def propose_update_impl(
                     tol_safety=state.tol_safety,
                     tol_est_noise=state.tol_est_noise,
                     route_threshold=state.route_threshold,
-                    audit_canary_prob=state.audit_canary_prob)
-    committed, redo, silent, arm = cr.resolve(f, batch, state.fields, cfg, state.rng)
+                    audit_canary_prob=state.audit_canary_prob,
+                    hmac_secret=state.hmac_secret)
+    metrics = cr.Metrics()
+    (committed, redo, silent, arm, audit_dis, fork_reason) = cr.resolve(
+        f, batch, state.fields, cfg, state.rng, state.track, metrics)
     # staleness accounting at resolve time (for the CSV). occ uses rev-stale;
     # occ_value, cascade, and hybrid all use the value-predicate drift.
     if f.policy == "occ":
@@ -305,6 +320,9 @@ async def propose_update_impl(
         audit_disagreement = cr.audit_disagreement(f, batch, state.fields, winner)
     # which predicate passed: "rev" for OCC, "value" for cascade/occ_value/FORK
     predicate_passed = "rev" if f.policy == "occ" else "value"
+    # update calibration track record for the committed write's agent
+    if committed and arm in ("WINNER", "OCC_COMMIT"):
+        cr._update_track(state.track, w, silent)
     if committed:
         cr.bump(f, state.rng, cfg)
     del state.pending[field]
@@ -320,6 +338,10 @@ async def propose_update_impl(
         "configured_materiality": f.materiality,
         "configured_true_tol": f.true_tol,
         "audit_check": audit_check, "audit_disagreement": audit_disagreement,
+        # fork_reason: None unless a tie persisted after calibration (FORK arm).
+        "fork_reason": fork_reason,
+        # integrity: count of writes rejected for present-but-wrong HMAC.
+        "hmac_failures": int(metrics.events.get("hmac_failure", 0)),
     }
 
 
@@ -361,6 +383,7 @@ async def list_tools() -> list[types.Tool]:
                     "tol_est_noise": {"type": "number"},
                     "trust_writer_tolerance": {"type": "boolean"},
                     "audit_canary_prob": {"type": "number"},
+                    "hmac_secret": {"type": "string"},
                 },
                 "required": ["n_levels", "fields_per_level", "deps_per_field",
                              "frac_zero_tol", "zero_tol", "gen_tol",
@@ -433,6 +456,7 @@ _TOOL_ARGS = {
         "zero_tol", "gen_tol", "tol_safety", "route_threshold", "value_drift",
         "fresh_loser_redo_prob", "seed", "policy_mode", "global_materiality",
         "tol_est_noise", "trust_writer_tolerance", "audit_canary_prob",
+        "hmac_secret",
     },
     "read_state": {"fields", "agent_id", "write_field"},
     "propose_update": {"field", "proposed_value", "confidence",

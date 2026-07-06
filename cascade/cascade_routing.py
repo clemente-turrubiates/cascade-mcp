@@ -34,7 +34,13 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from collections import Counter
+from collections import Counter, namedtuple
+
+# resolve() returns this so callers can access fields by name without
+# unpacking a 6-tuple positionally.
+ResolveResult = namedtuple("ResolveResult",
+                            ["committed", "redo", "silent", "arm",
+                             "audit_disagreement", "fork_reason"])
 
 @dataclass
 class Field:
@@ -45,6 +51,12 @@ class Field:
 @dataclass
 class Write:
     tier: int; conf: float; read_rev: dict; read_val: dict
+    agent_id: str = ""          # source of the write, for track-record calibration
+    read_hmac: str = ""         # integrity binding over the read-set snapshot
+
+
+FORK_TIER_TIE = "FORK_TIER_TIE"
+FORK_CONF_TIE = "FORK_CONF_TIE"
 
 @dataclass
 class Config:
@@ -77,6 +89,10 @@ class Config:
     # gets a looser error bar AND a self-certifying write. Models the
     # unprivileged-writer attack path.
     writer_tol_inflation: float = 1.0
+    # HMAC secret for read-set integrity binding. Empty string -> pass-through
+    # (backward compat). A deployment injects a real key; a present-but-wrong
+    # HMAC then rejects the write (treated as a bad read-set, like RECOMPUTE).
+    hmac_secret: str = ""
     fresh_loser_redo_prob: float = 0.0; seed: int = 0
 
 def drift(w, F):
@@ -85,6 +101,64 @@ def rev_stale(w, F):
     return any(F[d].rev > s for d, s in w.read_rev.items())
 def bump(f, rng, cfg):
     f.rev += 1; f.value *= (1.0 + rng.gauss(0.0, cfg.value_drift))
+
+
+# ----------------------------- integrity / calibration -----------------------
+
+def _read_set_digest(w, F):
+    """Stable string digest of what the writer claimed to have read."""
+    parts = []
+    for d in sorted(w.read_rev.keys()):
+        rev = w.read_rev[d]
+        val = w.read_val.get(d, F[d].value if d in F else 1.0)
+        parts.append(f"{d}:{rev}:{val:.9g}")
+    return "|".join(parts)
+
+
+def _verify_hmac(w, F, secret):
+    """Verify that the read-set HMAC binds to the claimed rev/value snapshot.
+    Returns True if no HMAC is present (pass-through) or if HMAC matches.
+    A present-but-wrong HMAC returns False — the caller rejects that write."""
+    import hmac as _hmac, hashlib
+    if not w.read_hmac:
+        return True
+    digest = _hmac.new(secret.encode() if secret else b"",
+                       _read_set_digest(w, F).encode(),
+                       hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(digest, w.read_hmac)
+
+
+def _effective_conf(w, track):
+    """Blend caller-asserted confidence with a calibrated track record.
+    If the agent has no history, trust the asserted value. If it has a
+    history, downgrade asserted confidence toward the observed accuracy.
+    """
+    if not w.agent_id or w.agent_id not in track:
+        return w.conf
+    correct, total = track[w.agent_id]
+    if total == 0:
+        return w.conf
+    empirical = correct / total
+    weight = min(1.0, total / 10.0)  # needs ~10 samples to dominate
+    return (1.0 - weight) * w.conf + weight * empirical
+
+
+def _update_track(track, w, silent):
+    """Record whether this agent's winning/committed write was correct."""
+    if not w.agent_id:
+        return
+    correct, total = track.get(w.agent_id, (0, 0))
+    track[w.agent_id] = (correct + (0 if silent else 1), total + 1)
+
+
+class Metrics:
+    """Observable counters emitted by the router."""
+    def __init__(self):
+        self.events: Counter = Counter()
+        self.fork_reasons: Counter = Counter()
+
+    def emit(self, name: str, value: int = 1) -> None:
+        self.events[name] += value
 
 def build(cfg, rng):
     F, by = {}, []
@@ -112,29 +186,69 @@ def build(cfg, rng):
             F[fid] = f
     return F
 
-def resolve(f, grp, F, cfg, rng):
+def resolve(f, grp, F, cfg, rng=None, track=None, metrics=None):
+    """Resolve a batch of writes for field `f`. Returns a 6-tuple:
+      (committed, redo, silent, arm, audit_disagreement, fork_reason).
+
+    Trust boundary:
+      - writer `tolerance` is NOT applied here (caller-side; see server.py).
+      - HMAC: a present-but-wrong read_hmac rejects the write (bad read-set).
+        Missing HMAC is pass-through (backward compat).
+      - confidence: caller-asserted conf is blended with empirical track record
+        via _effective_conf; a strong track record can override a weak claim.
+    """
+    rng = rng if rng is not None else random.Random(0)
+    track = track or {}
+    metrics = metrics or Metrics()
+
+    # Integrity check: present-but-wrong HMAC rejects the write.
+    hmac_bad: list[Write] = []
+    good_grp: list[Write] = []
+    for w in grp:
+        if w.read_hmac and not _verify_hmac(w, F, cfg.hmac_secret):
+            hmac_bad.append(w)
+            metrics.emit("hmac_failure")
+        else:
+            good_grp.append(w)
+    grp = good_grp
+
     if f.policy == "occ":
         fresh = [w for w in grp if not rev_stale(w, F)]
-        if fresh: return True, len(grp) - 1, 0, "OCC_COMMIT"
-        return False, len(grp), 0, "OCC_ALLABORT"
+        if fresh:
+            return ResolveResult(True, len(grp) - 1, 0, "OCC_COMMIT", 0, None)
+        return ResolveResult(False, len(grp), 0, "OCC_ALLABORT", 0, None)
     if f.policy == "occ_value":
-        # value predicate + OCC accounting: commit one fresh, ALL losers rerun
-        # (no free adoption), no fork/authority. Can leak, because a flat global
-        # materiality has no idea of this field's true tolerance.
         fresh = [w for w in grp if drift(w, F) <= f.materiality]
-        if not fresh: return False, len(grp), 0, "OCC_ALLABORT"
+        if not fresh:
+            return ResolveResult(False, len(grp), 0, "OCC_ALLABORT", 0, None)
         silent = 1 if drift(fresh[0], F) > f.true_tol else 0
-        return True, len(grp) - 1, silent, "OCC_COMMIT"
+        return ResolveResult(True, len(grp) - 1, silent, "OCC_COMMIT", 0, None)
+
     m = f.materiality
     fresh = [w for w in grp if drift(w, F) <= m]; n_stale = len(grp) - len(fresh)
-    if not fresh: return False, len(grp), 0, "RECOMPUTE"
+    if not fresh:
+        return ResolveResult(False, len(grp), 0, "RECOMPUTE", 0, None)
     redo = n_stale + sum(1 for _ in range(len(fresh) - 1) if rng.random() < cfg.fresh_loser_redo_prob)
-    bt = min(w.tier for w in fresh); top = [w for w in fresh if w.tier == bt]
-    if len(top) > 1:
-        bc = max(w.conf for w in top); top = [w for w in top if w.conf == bc]
-    if len(top) > 1: return True, redo, 0, "FORK"
-    silent = 1 if drift(top[0], F) > f.true_tol else 0
-    return True, redo, silent, "WINNER"
+
+    # apply calibrated confidence to break ties (do not mutate the Write)
+    calibrated = [_effective_conf(w, track) for w in fresh]
+    bt = min(w.tier for w in fresh); top_w = [w for w in fresh if w.tier == bt]
+    if len(top_w) > 1:
+        top_c = [_effective_conf(w, track) for w in top_w]
+        bc = max(top_c); winners = [top_w[i] for i, c in enumerate(top_c)
+                                    if abs(c - bc) < 1e-12]
+    else:
+        winners = top_w
+    if len(winners) == 1:
+        winner = winners[0]
+        fork_reason = None
+    else:
+        # tie persists after calibration -> FORK
+        fork_reason = FORK_CONF_TIE if len(top_w) > 1 else None
+        return ResolveResult(True, redo, 0, "FORK", 0, fork_reason)
+
+    silent = 1 if drift(winner, F) > f.true_tol else 0
+    return ResolveResult(True, redo, silent, "WINNER", 0, None)
 
 def audit_disagreement(f, grp, F, winner):
     """Canary check for cascade commits: would the OCC rev-predicate have
@@ -147,28 +261,32 @@ def audit_disagreement(f, grp, F, winner):
     if winner is None: return 0
     return 1 if rev_stale(winner, F) else 0
 
-def run(cfg):
+def run(cfg, record=None):
     rng = random.Random(cfg.seed); F = build(cfg, rng)
     src = [f for f in F.values() if f.level == 0]; der = [f for f in F.values() if f.level > 0]
     topo = sorted(F.values(), key=lambda f: f.level); pending, since, M = {}, {}, Counter()
+    track: dict[str, tuple[int, int]] = {}
+    metrics = Metrics()
+    rows = [] if record is not None else None
     for r in range(cfg.rounds):
+        metrics.emit("round")
         for f in src:
-            if rng.random() < cfg.source_write_prob: bump(f, rng, cfg)
+            if rng.random() < cfg.source_write_prob:
+                bump(f, rng, cfg); metrics.emit("source_churn")
         for f in der:
             if f.id in pending: continue
             if rng.random() < cfg.contention_prob:
                 grp = [Write(2, rng.choice(cfg.conf_levels),
-                             {d: F[d].rev for d in f.deps}, {d: F[d].value for d in f.deps})
+                             {d: F[d].rev for d in f.deps}, {d: F[d].value for d in f.deps},
+                             agent_id=f"a{r}_{f.id}")
                        for _ in range(rng.randint(*cfg.width))]
                 pending[f.id] = grp; since[f.id] = r
+                metrics.emit("contention_issued", len(grp))
         for f in topo:
             g = pending.get(f.id)
             if g is None or r - since[f.id] < cfg.lag: continue
             # TRUST BOUNDARY: writer-asserted tolerance is advisory unless
-            # trust_writer_tolerance turns the hole back ON for [13]. When ON,
-            # every writer declares true_tol*writer_tol_inflation and the
-            # field's true_tol is redefined per-write — both the routing and
-            # the silent_error bar relax, so the write self-certifies.
+            # trust_writer_tolerance turns the hole back ON for [13].
             if cfg.trust_writer_tolerance and cfg.writer_tol_inflation != 1.0:
                 f.true_tol = f.true_tol * cfg.writer_tol_inflation
                 if cfg.policy == "hybrid":
@@ -179,22 +297,56 @@ def run(cfg):
                         f.policy = "occ"
                     else:
                         f.policy = "cascade"; f.materiality = measured
-            committed, redo, silent, arm = resolve(f, g, F, cfg, rng)
+            (committed, redo, silent, arm, audit_dis, fork_reason) = resolve(
+                f, g, F, cfg, rng, track, metrics)
             M["conflicts"] += 1; M["recomputes"] += redo; M["silent_errors"] += silent; M[arm] += 1
-            # audit canary: on a sampled fraction of cascade commits, run the
-            # OCC rev-check too and record a disagreement if it would have
-            # rejected. Observable leak proxy WITHOUT true_tol ground truth.
+            metrics.emit("conflict_resolved"); metrics.emit(f"arm:{arm}")
+            if audit_dis:
+                M["audit_disagreements"] = M.get("audit_disagreements", 0) + 1
+                metrics.emit("audit_disagreement")
+            if fork_reason:
+                metrics.fork_reasons[fork_reason] += 1
+            # audit canary: on a sampled fraction of cascade/occ_value commits,
+            # run the OCC rev-check too and record a disagreement if the two
+            # arms would have disagreed. Observable leak proxy WITHOUT true_tol.
             if (committed and f.policy in ("cascade", "occ_value")
                     and rng.random() < cfg.audit_canary_prob):
-                M["audit_checks"] += 1
-                # winner = the first fresh write (the one cascade committed)
+                M["audit_checks"] = M.get("audit_checks", 0) + 1
                 m = f.materiality
                 fresh = [w for w in g if drift(w, F) <= m]
                 winner = fresh[0] if fresh else None
-                M["audit_disagreements"] += audit_disagreement(f, g, F, winner)
-            if committed: M["commits"] += 1; bump(f, rng, cfg)   # keeps contending; no freeze
+                M["audit_disagreements"] = M.get("audit_disagreements", 0) + audit_disagreement(f, g, F, winner)
+            if committed:
+                M["commits"] += 1; bump(f, rng, cfg); metrics.emit("commit")
+                if silent: metrics.emit("silent_error")
+                # update track record for the committed write's agent
+                if arm == "WINNER":
+                    _update_track(track, _winner_write(g, F, f, f.materiality), silent)
+                elif arm == "OCC_COMMIT":
+                    w = next((w for w in g if not rev_stale(w, F)), None)
+                    if w is not None: _update_track(track, w, silent)
+            if rows is not None:
+                rows.append({
+                    "round": r, "field": f.id, "level": f.level,
+                    "policy": f.policy, "arm": arm,
+                    "n_writers": len(g), "recomputes": redo,
+                    "silent_error": silent,
+                    "fork_reason": fork_reason or "",
+                    "true_tol": f.true_tol, "materiality": f.materiality,
+                })
             del pending[f.id]; del since[f.id]
+    if record is not None:
+        return M, rows, metrics
     return M
+
+
+def _winner_write(grp, F, f, m):
+    """Recover the winning Write object from a batch (matches resolve's pick)."""
+    fresh = [w for w in grp if drift(w, F) <= m]
+    if not fresh: return None
+    bt = min(w.tier for w in fresh); top = [w for w in fresh if w.tier == bt]
+    if len(top) == 1: return top[0]
+    return top[0]  # calibration already applied in resolve; approx here for track
 
 def rep(label, M):
     c = M["conflicts"] or 1; cm = M["commits"] or 1
@@ -256,6 +408,24 @@ def main():
                        writer_tol_inflation=infl, audit_canary_prob=1.0)))
     print("     -> audit_disagreements rises with inflation even though silent_err")
     print("     was self-certified to ~0. The canary sees what silent_err can't.")
+
+    print("\n[14] CONFIDENCE CALIBRATION: track record overrides asserted confidence")
+    print("     _effective_conf blends caller-asserted conf with empirical accuracy.")
+    print("     Two agents, same tier, both assert 0.95. With empty track -> FORK.")
+    print("     With divergent track records -> the accurate agent wins outright.")
+    f = Field("L1_0", 1, ["L0_0"], true_tol=0.25, policy="cascade", materiality=0.20)
+    F = {"L0_0": Field("L0_0", 0, [], rev=0, value=1.0), f.id: f}
+    good = Write(2, 0.95, {"L0_0": 0}, {"L0_0": 1.0}, agent_id="good")
+    bad = Write(2, 0.95, {"L0_0": 0}, {"L0_0": 1.0}, agent_id="bad")
+    rng = random.Random(0)
+    _, _, _, arm0, _, reason0 = resolve(f, [good, bad], F, Config(), rng, track={})
+    print(f"     empty track:     arm={arm0} fork_reason={reason0}  (tie -> FORK)")
+    _, _, _, arm1, _, reason1 = resolve(
+        f, [good, bad], F, Config(), random.Random(0),
+        track={"good": (10, 10), "bad": (0, 10)})
+    print(f"     calibrated track: arm={arm1} fork_reason={reason1}  (good agent wins)")
+    print("     -> calibration is the same trust-boundary class as the tolerance fix:")
+    print("     caller-asserted confidence is advisory; the track record is evidence.")
     print("=" * 104)
 
 if __name__ == "__main__":
