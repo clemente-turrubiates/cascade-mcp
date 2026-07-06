@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-06
+
+### Added
+- **HMAC read-set integrity**: `Write.read_hmac` + `Config.hmac_secret` +
+  `_read_set_digest`/`_verify_hmac`. A present-but-wrong HMAC rejects the write
+  (RECOMPUTE) and emits an `hmac_failure` metric. Missing HMAC stays
+  pass-through (backward compat). Closes the decorative-verification hole
+  where `_verify_hmac` returned `False` and nobody acted on it. `hmac_secret`
+  is a new `configure` knob.
+- **Confidence calibration**: `_effective_conf` blends caller-asserted
+  confidence with an empirical track record (Bayesian-ish shrinkage toward
+  observed accuracy). `_update_track` records correctness after commits.
+  Same trust-boundary class as the tolerance fix: caller-asserted confidence
+  is advisory, the track record is evidence. Experiment `[14]` shows it
+  flipping FORK→WINNER with divergent track records.
+- **fork_reason**: FORK arms now carry `FORK_CONF_TIE` so the downstream
+  arbiter knows why (was a bare `FORK` with no reason). Surfaced in
+  `propose_update` results.
+- **Metrics class**: emits counters — `round`, `source_churn`,
+  `conflict_resolved`, `arm:*`, `commit`, `silent_error`, `hmac_failure`,
+  `audit_disagreement`. Wired into `run`.
+- **ResolveResult namedtuple**: `resolve()` returns named fields
+  (`committed`, `redo`, `silent`, `arm`, `audit_disagreement`,
+  `fork_reason`) instead of a positional 6-tuple.
+- **tests/test_router_unit.py**: 13 unit tests covering OCC/cascade/fork
+  routing, hybrid routing, calibration flip, HMAC enforcement (reject
+  mismatched, pass-through missing), and the audit canary (rev_stale based,
+  no `true_tol` oracle).
+
+### Changed
+- `propose_update` result now includes `fork_reason` and `hmac_failures`.
+- `configure` inputSchema + `call_tool` allowlist now include `hmac_secret`.
+- `Write` dataclass has `agent_id` and `read_hmac` fields.
+
 ## [0.2.1] - 2026-07-06
 
 ### Changed
@@ -65,7 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the server preserves the router's behavior end-to-end.
 - Packaging for `uvx cascade-mcp` / PyPI (hatchling), MIT licensed.
 
-[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/clemente-turrubiates/cascade-mcp/releases/tag/v0.1.0
