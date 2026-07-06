@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-06
+
+### Added
+- **Structured logging to stderr**: `read_state` logs the read-set snapshot
+  (`deps=[L0_0@r0=1, L0_1@r0=1]`), `propose` logs batch accumulation
+  (`batch 1/2 (pending)` / `batch 2/2 (resolving)`), `resolve` logs the
+  decision (`arm=FORK committed=True silent=0 stale=0/2
+  fork_reason=FORK_CONF_TIE`). A developer watching the server process sees
+  the full decision trail in real time. stdout stays pure JSON-RPC.
+- **Startup banner**: version, tools, and logging target printed to stderr on
+  boot.
+- **`tests/e2e_local_swarm.py`**: 28-check end-to-end test that spawns the real
+  MCP server process and drives 3 agents through JSON-RPC — configure,
+  read_state (with churn between reads), propose_update (WINNER/FORK/OCC_COMMIT/
+  OCC_ALLABORT), error cases (missing field, unknown tool, unknown arg),
+  reconfigure, audit canary at 100%. All 28 pass.
+
+### Changed
+- **Error messages improved**: `call_tool` catches `KeyError` on missing fields
+  and returns `"field 'L99_99' not found. Has configure been called?"` instead
+  of a raw traceback. Unknown tool error now lists available tools. Unknown arg
+  error quotes the tool name.
+- Bug fix: `n_stale` was referenced in the resolve log line before being
+  computed (`UnboundLocalError`); moved computation before the log.
+
 ## [0.3.1] - 2026-07-06
 
 ### Changed
@@ -112,7 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the server preserves the router's behavior end-to-end.
 - Packaging for `uvx cascade-mcp` / PyPI (hatchling), MIT licensed.
 
-[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.0...v0.2.1
