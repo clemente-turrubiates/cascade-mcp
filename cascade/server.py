@@ -49,8 +49,10 @@ Run as a stdio MCP server:  python -m cascade.server
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
+import sys
 from typing import Any
 
 import mcp.types as types
@@ -58,6 +60,21 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from cascade import cascade_routing as cr
+
+# Structured logging to stderr (stdout is the JSON-RPC transport — never
+# log there). MCP clients capture stderr for diagnostics; a developer
+# watching the server process sees every read-set, batch, and resolve
+# decision in real time.
+logger = logging.getLogger("cascade")
+
+
+def _setup_logging() -> None:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-5s | %(message)s",
+        datefmt="%H:%M:%S"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 # ----------------------------- shared state ----------------------------------
 # Module-global so the stdio server and in-process tests share one engine.
@@ -210,6 +227,10 @@ async def read_state_impl(fields: list[str], agent_id: str,
     if write_field:
         state.read_rev[(agent_id, write_field)] = log_rev
         state.read_val[(agent_id, write_field)] = log_val
+        deps_str = ", ".join(f"{d}@r{log_rev[d]}={log_val[d]:.4g}"
+                             for d in sorted(log_rev))
+        logger.info("read_state  agent=%s write=%s deps=[%s]", agent_id,
+                     write_field, deps_str)
     return {"fields": snapshot}
 
 
@@ -218,6 +239,7 @@ async def churn_impl(field: str) -> dict:
     f = state.fields[field]
     f.rev += 1
     f.value *= (1.0 + state.rng.gauss(0.0, state.value_drift))
+    logger.info("churn       %s -> rev=%d value=%.4g", field, f.rev, f.value)
     return {"field": field, "rev": f.rev, "value": f.value}
 
 
@@ -251,9 +273,17 @@ async def propose_update_impl(
     state.pending.setdefault(field, []).append(w)
     batch = state.pending[field]
     if len(batch) < expected_writers:
+        logger.info("propose     %s agent=%s tier=%d conf=%.2f "
+                     "batch %d/%d (pending)",
+                     field, agent_id, authority_tier, confidence,
+                     len(batch), expected_writers)
         return {"status": "pending", "field": field,
                 "received": len(batch), "expected": expected_writers}
     # batch complete -> resolve
+    logger.info("propose     %s agent=%s tier=%d conf=%.2f "
+                 "batch %d/%d (resolving)",
+                 field, agent_id, authority_tier, confidence,
+                 len(batch), expected_writers)
     # TRUST BOUNDARY: the writer's `tolerance` is advisory unless
     # trust_writer_tolerance turns the hole back ON for [13]. When ON, a
     # differing tolerance redefines true_tol AND re-derives routing — both the
@@ -287,7 +317,13 @@ async def propose_update_impl(
     if f.policy == "occ":
         n_stale = sum(1 for ww in batch if cr.rev_stale(ww, state.fields))
     else:
-        n_stale = sum(1 for ww in batch if cr.drift(ww, state.fields) > f.materiality)
+        n_stale = sum(
+            1 for ww in batch if cr.drift(ww, state.fields) > f.materiality)
+    logger.info("resolve     %s arm=%s committed=%s silent=%d "
+                 "stale=%d/%d%s%s",
+                 field, arm, committed, silent, n_stale, len(batch),
+                 f" fork_reason={fork_reason}" if fork_reason else "",
+                 f" audit_disagree={audit_dis}" if audit_dis else "")
     # winner tier/conf
     if arm in ("WINNER", "FORK", "OCC_COMMIT"):
         fresh = [ww for ww in batch
@@ -503,29 +539,43 @@ _TOOL_ARGS = {
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     if name not in _TOOL_ARGS:
-        raise ValueError(f"unknown tool: {name}")
+        raise ValueError(
+            f"unknown tool '{name}'. Available: {sorted(_TOOL_ARGS.keys())}")
     allowed = _TOOL_ARGS[name]
     unknown = set(arguments.keys()) - allowed
     if unknown:
         raise ValueError(
-            f"unknown argument(s) for {name}: {sorted(unknown)}; "
+            f"unknown argument(s) for '{name}': {sorted(unknown)}; "
             f"accepted: {sorted(allowed)}")
-    if name == "configure":
-        r = await configure_impl(**arguments)
-    elif name == "read_state":
-        r = await read_state_impl(**arguments)
-    elif name == "propose_update":
-        r = await propose_update_impl(**arguments)
-    elif name == "churn":
-        r = await churn_impl(**arguments)
-    elif name == "get_field":
-        r = await get_field_impl(**arguments)
-    else:
-        raise ValueError(f"unknown tool: {name}")
+    try:
+        if name == "configure":
+            r = await configure_impl(**arguments)
+        elif name == "read_state":
+            r = await read_state_impl(**arguments)
+        elif name == "propose_update":
+            r = await propose_update_impl(**arguments)
+        elif name == "churn":
+            r = await churn_impl(**arguments)
+        elif name == "get_field":
+            r = await get_field_impl(**arguments)
+        else:
+            raise ValueError(f"unknown tool: {name}")
+    except KeyError as e:
+        key = str(e).strip("'\"")
+        raise ValueError(
+            f"field '{key}' not found. Has configure been called? "
+            f"Use get_field to inspect available fields.") from e
+    except ValueError:
+        raise
     return [types.TextContent(type="text", text=json.dumps(r, default=str))]
 
 
 async def main() -> None:
+    _setup_logging()
+    logger.info("cascade-mcp starting (stdio MCP server on stdin/stdout)")
+    logger.info("  tools: configure, read_state, propose_update, churn, "
+                "get_field")
+    logger.info("  logging to stderr (stdout is the JSON-RPC transport)")
     async with stdio_server() as (read, write):
         await server.run(read, write, server.create_initialization_options())
 
