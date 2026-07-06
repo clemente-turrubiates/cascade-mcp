@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-06
+
+### Changed
+- **Trust boundary closed (breaking-ish):** `propose_update`'s `tolerance`
+  argument is now advisory and ignored by default. The field's `true_tol` is
+  configure-authoritative and immutable at write time. Previously a
+  writer-supplied tolerance unconditionally redefined `true_tol` (and in hybrid
+  mode re-routed the field), which also redefined the number `silent_error` is
+  measured against — the write self-certified. Set `trust_writer_tolerance=True`
+  at configure to turn the hole back ON as a switchable regime for experiment
+  `[13]` rather than relying on the unconditional bug.
+- `call_tool` now rejects unknown arguments via a per-tool allowlist instead of
+  forwarding `**arguments` blind. A schema-ignoring client can no longer reach
+  half-wired `configure_impl` params.
+- `propose_update` result now surfaces `predicate_passed` (rev vs value),
+  `configured_materiality`, `configured_true_tol`, `audit_check`, and
+  `audit_disagreement`, so a caller can't be blind to which predicate cleared.
+
+### Added
+- `trust_writer_tolerance` configure knob (default `False`): gates the
+  self-certifying-writer hole as a measurable regime instead of a silent bug.
+- `audit_canary_prob` configure knob: on a sampled fraction of
+  cascade/occ_value commits, also runs the OCC rev-check and records
+  disagreements. Observable leak rate WITHOUT `true_tol` ground truth — the
+  instrument that makes the router trustable in the wild when routing is wrong.
+- `tol_est_noise` now exposed in the `configure` inputSchema (was reachable
+  only by schema-ignoring clients; now symmetric with the impl signature).
+- `cr.audit_disagreement` helper and `audit_disagreements` counter in `cr.run`.
+- Experiment `[13]` in `cascade_routing.main`: reproduces the self-cert hole
+  (silent_err collapses to 0 under `writer_tol_inflation>1`) and `[13b]` shows
+  the canary detecting the leak (audit 19014/19653 disagree at infl=2).
+- Thesis notes atop both `cascade_routing.py` and `server.py` framing the
+  integrity model: cascade is the cheap arm, not a correctness mechanism;
+  correctness lives in the router; router correctness reduces to
+  tolerance-estimate integrity; three independent corruption paths, each
+  quantified.
+
 ## [0.1.0] - 2026-07-06
 
 ### Added
@@ -21,5 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the server preserves the router's behavior end-to-end.
 - Packaging for `uvx cascade-mcp` / PyPI (hatchling), MIT licensed.
 
-[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/clemente-turrubiates/cascade-mcp/releases/tag/v0.1.0
