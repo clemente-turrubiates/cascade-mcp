@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
 """
 server.py — MCP server that wraps cascade_routing.py as a concurrency
-controller for AI agents. Two main tools:
+controller for AI agents.
 
-  read_state(fields, agent_id)
+THESIS (so reviewers stop relitigating cascade):
+  cascade is the cheap arm, not a correctness mechanism. Correctness lives in
+  the router. The router's correctness reduces to tolerance-estimate integrity.
+  Three independent corruption paths, each reachable as a configure knob and
+  quantified in cascade_routing.main() experiment [13]:
+    tol_safety              config lies about the tolerance estimate
+    trust_writer_tolerance   a write self-certifies its own error bar
+    tol_est_noise           honest but imperfect measurement spread
+  The audit canary (audit_canary_prob) is what saves you when routing is wrong:
+  on a sampled fraction of cascade commits, run the OCC rev-check too and
+  record disagreements. Observable leak rate WITHOUT true_tol ground truth.
+
+TRUST BOUNDARY: a writer-supplied tolerance is NOT ground truth. The field's
+true_tol is set at configure and is immutable at write time. propose_update's
+`tolerance` arg is advisory by default; trust_writer_tolerance turns the hole
+back ON so [13] can measure it in the same silent_errors currency.
+
+Tools:
+  read_state(fields, agent_id, write_field)
       Returns current value+rev of the requested fields and secretly logs
       them as that agent's read-set (the rev/value snapshot the agent saw).
 
   propose_update(field, proposed_value, confidence, authority_tier,
                  tolerance, agent_id, expected_writers)
       Records the agent's proposed write against their logged read-set. When
-      the batch for `field` reaches `expected_writers`, runs the hybrid
+      the batch for `field` reaches expected_writers, runs the hybrid
       resolve_field router (cr.resolve) on the whole batch, commits/bumps on
-      a winning arm, and returns the outcome. Earlier calls in the batch
-      return {"status": "pending"}; the final call returns the full result.
+      a winning arm, and returns the outcome. `tolerance` is advisory and
+      ignored unless trust_writer_tolerance=True (configure). Earlier calls
+      in the batch return {"status": "pending"}; the final call returns the
+      full result including which predicate passed (rev vs value) and the
+      field's configured materiality.
 
 A configure tool builds the dependency DAG with per-field tolerance/policy
 (mirrors cr.build). The resolver is called directly on cr.resolve/cr.bump so
@@ -75,6 +96,17 @@ class CascadeState:
         # fields even at tol_safety=1 -> silent errors (perfect-knowledge
         # artifact test).
         self.tol_est_noise: float = 0.0
+        # TRUST BOUNDARY: if True, a writer-supplied `tolerance` in
+        # propose_update redefines the field's true_tol AND re-derives
+        # routing (the self-certifying-writer hole). Default False: true_tol
+        # is configure-authoritative and immutable at write time. Exposed so
+        # experiment [13] can reproduce the hole as a switchable regime.
+        self.trust_writer_tolerance: bool = False
+        # Audit canary fraction: on this fraction of cascade/occ_value
+        # commits, also run the OCC rev-check and record a disagreement if
+        # the two arms would disagree. Observable leak proxy WITHOUT
+        # true_tol ground truth (mirrors cr.Config.audit_canary_prob).
+        self.audit_canary_prob: float = 0.0
         self.rng: random.Random = random.Random(0)
 
     def reset(self) -> None:
@@ -98,6 +130,8 @@ async def configure_impl(
     fresh_loser_redo_prob: float, seed: int,
     policy_mode: str = "hybrid", global_materiality: float = 0.20,
     tol_est_noise: float = 0.0,
+    trust_writer_tolerance: bool = False,
+    audit_canary_prob: float = 0.0,
 ) -> dict:
     """Build the DAG exactly like cr.build, then store regime config."""
     state.rng = random.Random(seed)
@@ -114,6 +148,8 @@ async def configure_impl(
     state.policy_mode = policy_mode
     state.global_materiality = global_materiality
     state.tol_est_noise = tol_est_noise
+    state.trust_writer_tolerance = bool(trust_writer_tolerance)
+    state.audit_canary_prob = float(audit_canary_prob)
     state.reset()
     # build DAG (mirrors cr.build)
     by: list[list[str]] = []
@@ -183,10 +219,16 @@ async def propose_update_impl(
     expected_writers: int,
 ) -> dict:
     """Record a proposed write. When the batch reaches expected_writers, run
-    cr.resolve on the whole batch and return the outcome. Uses `tolerance` as
-    the field's true_tol for this write and re-derives policy/materiality from
-    it (mirrors cr.build's hybrid branch), so callers passing the field's
-    constant true_tol reproduce the sim exactly."""
+    cr.resolve on the whole batch and return the outcome.
+
+    TRUST BOUNDARY: `tolerance` is the writer's *claimed* error bar. By default
+    it is advisory and IGNORED for both routing and silent_error accounting —
+    the field's true_tol/materiality are fixed at configure time and immutable
+    at write time. This closes the self-certifying-writer hole (Finding 2),
+    where a writer supplying an inflated tolerance redefined the very number
+    silent_errors are measured against (cascade_routing.py:102). Set
+    trust_writer_tolerance=True at configure to turn the hole back ON as a
+    switchable regime (experiment [13])."""
     f = state.fields[field]
     # look up the agent's logged read-set for this field
     read_rev = state.read_rev.get((agent_id, field), {})
@@ -203,13 +245,14 @@ async def propose_update_impl(
         return {"status": "pending", "field": field,
                 "received": len(batch), "expected": expected_writers}
     # batch complete -> resolve
-    # Set the field's true_tol from the caller-declared tolerance. Re-derive
-    # routing ONLY in hybrid mode AND only if the caller's tolerance differs
-    # from what configure_impl already set (mirrors cr.build's hybrid branch).
-    # In occ/cascade modes the policy/materiality were fixed at configure time
-    # and must NOT be clobbered per-write. Re-deriving when tolerance is
-    # unchanged would also wipe any tol_est_noise applied at build time.
-    if abs(f.true_tol - tolerance) > 1e-12:
+    # TRUST BOUNDARY: the writer's `tolerance` is advisory unless
+    # trust_writer_tolerance turns the hole back ON for [13]. When ON, a
+    # differing tolerance redefines true_tol AND re-derives routing — both the
+    # routing and the silent_error bar relax, so the write self-certifies.
+    # Default (False): true_tol/materiality are fixed at configure; the caller
+    # cannot relax either by asserting a looser tolerance.
+    tolerance_changed = abs(f.true_tol - tolerance) > 1e-12
+    if tolerance_changed and state.trust_writer_tolerance:
         f.true_tol = tolerance
         if state.policy_mode == "hybrid":
             measured = tolerance * state.tol_safety
@@ -224,7 +267,8 @@ async def propose_update_impl(
                     fresh_loser_redo_prob=state.fresh_loser_redo_prob,
                     tol_safety=state.tol_safety,
                     tol_est_noise=state.tol_est_noise,
-                    route_threshold=state.route_threshold)
+                    route_threshold=state.route_threshold,
+                    audit_canary_prob=state.audit_canary_prob)
     committed, redo, silent, arm = cr.resolve(f, batch, state.fields, cfg, state.rng)
     # staleness accounting at resolve time (for the CSV). occ uses rev-stale;
     # occ_value, cascade, and hybrid all use the value-predicate drift.
@@ -246,6 +290,21 @@ async def propose_update_impl(
     else:
         win_tier = -1
         top_conf = -1.0
+    # audit canary: on a sampled fraction of value-predicate commits, also run
+    # the OCC rev-check and record a disagreement if the two arms would have
+    # disagreed. Observable leak proxy WITHOUT true_tol ground truth — this is
+    # the self-detectable instrument that makes the router trustable in the
+    # wild when routing is wrong (experiment [13b]).
+    audit_check = 0; audit_disagreement = 0
+    if (committed and f.policy in ("cascade", "occ_value")
+            and state.rng.random() < state.audit_canary_prob):
+        audit_check = 1
+        m = f.materiality
+        fresh = [ww for ww in batch if cr.drift(ww, state.fields) <= m]
+        winner = fresh[0] if fresh else None
+        audit_disagreement = cr.audit_disagreement(f, batch, state.fields, winner)
+    # which predicate passed: "rev" for OCC, "value" for cascade/occ_value/FORK
+    predicate_passed = "rev" if f.policy == "occ" else "value"
     if committed:
         cr.bump(f, state.rng, cfg)
     del state.pending[field]
@@ -254,6 +313,13 @@ async def propose_update_impl(
         "recomputes": redo, "silent_error": silent,
         "committed": committed, "n_writers": len(batch), "n_stale": n_stale,
         "win_tier": win_tier, "top_confidence": top_conf,
+        # surface the configured materiality and which predicate cleared, so a
+        # caller can't be blind to the fact that a WINNER cleared only the
+        # loose value check (not the strict rev check).
+        "predicate_passed": predicate_passed,
+        "configured_materiality": f.materiality,
+        "configured_true_tol": f.true_tol,
+        "audit_check": audit_check, "audit_disagreement": audit_disagreement,
     }
 
 
@@ -292,6 +358,9 @@ async def list_tools() -> list[types.Tool]:
                     "seed": {"type": "integer"},
                     "policy_mode": {"type": "string"},
                     "global_materiality": {"type": "number"},
+                    "tol_est_noise": {"type": "number"},
+                    "trust_writer_tolerance": {"type": "boolean"},
+                    "audit_canary_prob": {"type": "number"},
                 },
                 "required": ["n_levels", "fields_per_level", "deps_per_field",
                              "frac_zero_tol", "zero_tol", "gen_tol",
@@ -354,8 +423,36 @@ async def list_tools() -> list[types.Tool]:
     ]
 
 
+# Allowlist of accepted argument names per tool. Reject unknown args instead
+# of forwarding them blind via **arguments — a schema-ignoring client could
+# otherwise reach half-wired impl params (Finding 3). Each impl's signature is
+# the single source of truth; this mirrors it at the wire boundary.
+_TOOL_ARGS = {
+    "configure": {
+        "n_levels", "fields_per_level", "deps_per_field", "frac_zero_tol",
+        "zero_tol", "gen_tol", "tol_safety", "route_threshold", "value_drift",
+        "fresh_loser_redo_prob", "seed", "policy_mode", "global_materiality",
+        "tol_est_noise", "trust_writer_tolerance", "audit_canary_prob",
+    },
+    "read_state": {"fields", "agent_id", "write_field"},
+    "propose_update": {"field", "proposed_value", "confidence",
+                       "authority_tier", "tolerance", "agent_id",
+                       "expected_writers"},
+    "churn": {"field"},
+    "get_field": {"field"},
+}
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    if name not in _TOOL_ARGS:
+        raise ValueError(f"unknown tool: {name}")
+    allowed = _TOOL_ARGS[name]
+    unknown = set(arguments.keys()) - allowed
+    if unknown:
+        raise ValueError(
+            f"unknown argument(s) for {name}: {sorted(unknown)}; "
+            f"accepted: {sorted(allowed)}")
     if name == "configure":
         r = await configure_impl(**arguments)
     elif name == "read_state":

@@ -1,15 +1,34 @@
 #!/usr/bin/env python3
 """
 cascade_routing.py — pure OCC vs pure cascade vs per-field HYBRID.
+
+THESIS (so reviewers stop relitigating cascade):
+  cascade is the cheap arm, not a correctness mechanism. Correctness lives in
+  the router. The router's correctness reduces to tolerance-estimate integrity.
+  There are three independent ways integrity fails, each quantified in `main()`:
+    [12] tol_safety bias            (config lies about tolerance estimate)
+    [13] writer-asserted tolerance  (write self-certifies its own error bar)
+    noise (tol_est_noise)           (honest but imperfect measurement)
+  The audit canary (audit_canary) is what saves you when routing is wrong: a
+  self-detectable leak proxy that needs NO ground-truth true_tol.
+
 Fair head-to-head: forked/committed fields keep contending (no freeze), so
 conflict volumes are comparable across policies. Tracks BOTH costs:
   recomputes    wasted expensive re-runs (OCC overpays these under churn)
   silent_errors committed-but-actually-wrong values (cascade risks these)
+  audit_disagreements  cascade commits an OCC rev-check would have rejected
+                       (the canary; observable WITHOUT true_tol ground truth)
 
 Each field has a TRUE tolerance (drift its answer can absorb). Hybrid routes
 zero-tolerance fields to OCC (safe) and tolerant fields to the semantic cascade
 with materiality = measured tolerance. tol_safety>1 models OVER-estimating it.
 fresh_loser_redo_prob models the assumption that a fresh loser re-runs anyway.
+
+TRUST BOUNDARY: a writer-supplied tolerance is NOT ground truth. The field's
+true_tol is set at configure and is immutable at write time. The
+trust_writer_tolerance knob (wired in server.py, modeled in experiment [13])
+turns the self-certifying-writer hole back ON so it can be measured in the same
+silent_errors currency as everything else.
 """
 from __future__ import annotations
 import math
@@ -43,6 +62,21 @@ class Config:
     # fields even with tol_safety=1 -> silent errors appear (the safety=1 zero
     # is a perfect-knowledge artifact, not a property of the design).
     tol_est_noise: float = 0.0
+    # If True, a writer-supplied tolerance redefines the field's true_tol AND
+    # re-derives routing (the self-certifying-writer hole, Finding 2). Default
+    # False: true_tol is configure-authoritative and immutable at write time.
+    # Exposed so [13] can reproduce the hole as a switchable regime, not a bug.
+    trust_writer_tolerance: bool = False
+    # Audit canary fraction: on this fraction of cascade commits, also run the
+    # OCC rev-check and record a disagreement if the two disagree. Gives the
+    # system an OBSERVABLE estimate of its own leak rate WITHOUT true_tol
+    # ground truth — the thing you'd actually need to trust this in the wild.
+    audit_canary_prob: float = 0.0
+    # Writer-asserted tolerance inflation factor for [13]. >1 -> every writer
+    # declares true_tol*scale, so under trust_writer_tolerance=True the field
+    # gets a looser error bar AND a self-certifying write. Models the
+    # unprivileged-writer attack path.
+    writer_tol_inflation: float = 1.0
     fresh_loser_redo_prob: float = 0.0; seed: int = 0
 
 def drift(w, F):
@@ -102,6 +136,17 @@ def resolve(f, grp, F, cfg, rng):
     silent = 1 if drift(top[0], F) > f.true_tol else 0
     return True, redo, silent, "WINNER"
 
+def audit_disagreement(f, grp, F, winner):
+    """Canary check for cascade commits: would the OCC rev-predicate have
+    rejected this commit? Returns 1 if the OCC check would have aborted
+    (the winner is rev-stale w.r.t. its logged read-set) while the cascade
+    value-predicate committed. This is OBSERVABLE WITHOUT true_tol — it's
+    purely the two routing arms disagreeing on the same batch. A sustained
+    non-zero rate is the system's self-detected signal that its tolerance
+    estimates are mis-routing fields (the [13] leak proxy)."""
+    if winner is None: return 0
+    return 1 if rev_stale(winner, F) else 0
+
 def run(cfg):
     rng = random.Random(cfg.seed); F = build(cfg, rng)
     src = [f for f in F.values() if f.level == 0]; der = [f for f in F.values() if f.level > 0]
@@ -119,17 +164,47 @@ def run(cfg):
         for f in topo:
             g = pending.get(f.id)
             if g is None or r - since[f.id] < cfg.lag: continue
+            # TRUST BOUNDARY: writer-asserted tolerance is advisory unless
+            # trust_writer_tolerance turns the hole back ON for [13]. When ON,
+            # every writer declares true_tol*writer_tol_inflation and the
+            # field's true_tol is redefined per-write — both the routing and
+            # the silent_error bar relax, so the write self-certifies.
+            if cfg.trust_writer_tolerance and cfg.writer_tol_inflation != 1.0:
+                f.true_tol = f.true_tol * cfg.writer_tol_inflation
+                if cfg.policy == "hybrid":
+                    measured = f.true_tol * cfg.tol_safety
+                    if cfg.tol_est_noise > 0.0:
+                        measured *= math.exp(rng.gauss(0.0, cfg.tol_est_noise))
+                    if measured < cfg.route_threshold:
+                        f.policy = "occ"
+                    else:
+                        f.policy = "cascade"; f.materiality = measured
             committed, redo, silent, arm = resolve(f, g, F, cfg, rng)
             M["conflicts"] += 1; M["recomputes"] += redo; M["silent_errors"] += silent; M[arm] += 1
+            # audit canary: on a sampled fraction of cascade commits, run the
+            # OCC rev-check too and record a disagreement if it would have
+            # rejected. Observable leak proxy WITHOUT true_tol ground truth.
+            if (committed and f.policy in ("cascade", "occ_value")
+                    and rng.random() < cfg.audit_canary_prob):
+                M["audit_checks"] += 1
+                # winner = the first fresh write (the one cascade committed)
+                m = f.materiality
+                fresh = [w for w in g if drift(w, F) <= m]
+                winner = fresh[0] if fresh else None
+                M["audit_disagreements"] += audit_disagreement(f, g, F, winner)
             if committed: M["commits"] += 1; bump(f, rng, cfg)   # keeps contending; no freeze
             del pending[f.id]; del since[f.id]
     return M
 
 def rep(label, M):
     c = M["conflicts"] or 1; cm = M["commits"] or 1
-    print(f"  {label:<28} {M['recomputes']/c:4.2f} recompute/conflict   "
-          f"{M['recomputes']/cm:5.2f} recompute/commit   "
-          f"silent_err {M['silent_errors']:>4}   conflicts {M['conflicts']:>6}")
+    line = (f"  {label:<32} {M['recomputes']/c:4.2f} recompute/conflict   "
+            f"{M['recomputes']/cm:5.2f} recompute/commit   "
+            f"silent_err {M['silent_errors']:>4}   conflicts {M['conflicts']:>6}")
+    if M.get("audit_checks", 0) > 0:
+        ad = M["audit_disagreements"]; ac = M["audit_checks"]
+        line += f"   audit {ad}/{ac} disagree"
+    print(line)
 
 def main():
     print("=" * 104)
@@ -158,6 +233,29 @@ def main():
     for s in (1.0, 2.0, 5.0):
         rep(f"hybrid  tol_safety={s:.0f}", run(Config(policy="hybrid", tol_safety=s)))
     print("     Measure tolerance conservatively (safety<=1) -> silent_err stays 0.")
+
+    print("\n[13] TRUST BOUNDARY: writer-asserted tolerance (the self-cert hole)")
+    print("     trust_writer_tolerance=True lets each writer redefine true_tol.")
+    print("     A looser tolerance relaxes BOTH routing AND the silent_error bar,")
+    print("     so the write is correct by construction. With audit_canary on, the")
+    print("     system detects the leak WITHOUT true_tol ground truth.")
+    for infl in (1.0, 2.0, 5.0):
+        rep(f"hybrid writer_infl={infl:.0f} OFF",
+            run(Config(policy="hybrid")))  # baseline: advisory ignored
+    for infl in (1.0, 2.0, 5.0):
+        rep(f"hybrid writer_infl={infl:.0f} ON (hole)",
+            run(Config(policy="hybrid", trust_writer_tolerance=True,
+                       writer_tol_inflation=infl)))
+    print("     -> silent_err collapses to ~0 under the hole (self-certified);")
+    print("     the metric that's supposed to catch the misroute is the number the")
+    print("     attacker just supplied. No configure call, no elevated authority.")
+    print("\n[13b] audit canary: the self-detectable leak proxy (no true_tol oracle)")
+    for infl in (1.0, 2.0, 5.0):
+        rep(f"hybrid infl={infl:.0f} canary=1.0",
+            run(Config(policy="hybrid", trust_writer_tolerance=True,
+                       writer_tol_inflation=infl, audit_canary_prob=1.0)))
+    print("     -> audit_disagreements rises with inflation even though silent_err")
+    print("     was self-certified to ~0. The canary sees what silent_err can't.")
     print("=" * 104)
 
 if __name__ == "__main__":
