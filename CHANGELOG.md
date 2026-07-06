@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-06
+
+### Changed
+- README: document the integrity model (thesis table for the three corruption
+  paths), the trust boundary, the audit canary, and the integrity knobs table
+  so PyPI's project page reflects the 0.2.0 behavior change.
+
 ## [0.2.0] - 2026-07-06
 
 ### Changed
@@ -58,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proving the server preserves the router's behavior end-to-end.
 - Packaging for `uvx cascade-mcp` / PyPI (hatchling), MIT licensed.
 
-[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/clemente-turrubiates/cascade-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/clemente-turrubiates/cascade-mcp/releases/tag/v0.1.0

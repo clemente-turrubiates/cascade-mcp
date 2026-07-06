@@ -10,6 +10,33 @@ router that decides, per conflict, whether a write **wins**, **forks** to a
 human, or must be **recomputed**, plus an MCP server that exposes the router as
 tools and a stress-test suite that proves the behavior can't be cherry-picked.
 
+## Thesis
+
+**cascade is the cheap arm, not a correctness mechanism.** Correctness lives
+in the router. The router's correctness reduces to **tolerance-estimate
+integrity**. There are three independent ways integrity fails, each reachable
+as a `configure` knob and quantified in `cascade_routing`'s experiment `[13]`:
+
+| corruption path        | knob                       | who can exploit it         |
+| :--------------------- | :------------------------- | :------------------------- |
+| config lies about tol  | `tol_safety`               | the operator (don't lie)   |
+| write self-certifies   | `trust_writer_tolerance`   | any writer (one write)     |
+| honest imperfect meas. | `tol_est_noise`            | nobody — measurement noise |
+
+The **audit canary** (`audit_canary_prob`) is what saves you when routing is
+wrong: on a sampled fraction of cascade commits, also run the OCC rev-check
+and record disagreements. This gives the system an *observable* estimate of its
+own leak rate **without `true_tol` ground truth** — the instrument you'd
+actually need to trust this in the wild. Experiment `[13b]` shows the canary
+detecting leaks that `silent_error` can't (silent_err=0 while audit
+19014/19653 disagree at `writer_tol_inflation=2`).
+
+**Trust boundary:** a writer-supplied `tolerance` in `propose_update` is
+advisory and ignored by default. The field's `true_tol` is set at `configure`
+and is immutable at write time. Set `trust_writer_tolerance=True` to turn the
+self-certifying-writer hole back ON as a switchable regime (for measurement),
+not a silent bug.
+
 ## What's here
 
 The core question: when many agents write to the same field over a dependency
@@ -75,6 +102,19 @@ To attach the router to **Claude Desktop** or **Cursor**, add this to your
 
 The MCP server exposes five tools: `configure`, `read_state`, `propose_update`,
 `churn`, `get_field`.
+
+### Integrity knobs (`configure`)
+
+| knob                      | default | what it does                                                |
+| :------------------------ | :------ | :---------------------------------------------------------- |
+| `tol_safety`              | 1.0     | systematic bias on tolerance estimate (config lying)        |
+| `tol_est_noise`           | 0.0     | log-normal spread on tolerance estimate (honest measurement)|
+| `trust_writer_tolerance`  | false   | let writers redefine `true_tol` at write time (the hole)    |
+| `audit_canary_prob`       | 0.0     | fraction of cascade commits that also run the OCC check     |
+
+`propose_update` results now surface `predicate_passed` (rev vs value),
+`configured_materiality`, `configured_true_tol`, `audit_check`, and
+`audit_disagreement` — so a caller can't be blind to which predicate cleared.
 
 ## Usage (from source)
 
