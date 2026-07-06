@@ -118,15 +118,21 @@ The MCP server exposes five tools: `configure`, `read_state`, `propose_update`,
 | `audit_canary_prob`       | 0.0     | fraction of cascade commits that also run the OCC check     |
 | `hmac_secret`             | `""`    | secret for read-set HMAC; inject a real key to enforce integrity |
 
-`propose_update` results surface `predicate_passed` (rev vs value),
-`configured_materiality`, `configured_true_tol`, `audit_check`,
-`audit_disagreement`, `fork_reason` (FORK_CONF_TIE if a conf tie persisted
-after calibration), and `hmac_failures` — so a caller can't be blind to which
-predicate cleared or whether integrity checks failed.
+`propose_update` results include a human-readable `"summary"` one-liner
+(`"FORK: ties deferred to a human (fork); (FORK_CONF_TIE: confidence tie
+after calibration); committed"`) plus the structured fields: `predicate_passed`
+(rev vs value), `configured_materiality`, `configured_true_tol`,
+`audit_check`, `audit_disagreement`, `fork_reason`, and `hmac_failures`.
 
 ## Usage (from source)
 
 Clone the repo and run everything **from the repo root**.
+
+```bash
+git clone https://github.com/clemente-turrubiates/cascade-mcp.git
+cd cascade-mcp
+pip install -e ".[dev]"    # editable install + pytest + ruff
+```
 
 Run the MCP server (stdio):
 

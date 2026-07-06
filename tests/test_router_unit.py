@@ -6,9 +6,10 @@ integrity primitives, and calibration. Run:
     pytest tests/test_router_unit.py -v   (if pytest installed)
 """
 from __future__ import annotations
+
+import os
 import random
 import sys
-import os
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)

@@ -24,15 +24,15 @@ Run (from the repo root):
    re-encodes to UTF-16 and corrupts the CSV.)
 """
 from __future__ import annotations
+
 import csv
 import os
 import random
 import sys
-from dataclasses import replace, asdict
+from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cascade import cascade_routing as cr
-
 
 # ----------------------------- regime grid -----------------------------------
 # Each regime pins a coherent deployment corner. We don't do a giant cross

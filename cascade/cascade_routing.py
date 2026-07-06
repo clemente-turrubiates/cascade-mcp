@@ -31,10 +31,11 @@ turns the self-certifying-writer hole back ON so it can be measured in the same
 silent_errors currency as everything else.
 """
 from __future__ import annotations
+
 import math
 import random
-from dataclasses import dataclass
 from collections import Counter, namedtuple
+from dataclasses import dataclass
 
 # resolve() returns this so callers can access fields by name without
 # unpacking a 6-tuple positionally.
@@ -96,7 +97,10 @@ class Config:
     fresh_loser_redo_prob: float = 0.0; seed: int = 0
 
 def drift(w, F):
-    return max((abs(F[d].value/v0 - 1.0) if v0 else 0.0 for d, v0 in w.read_val.items()), default=0.0)
+    return max(
+        (abs(F[d].value / v0 - 1.0) if v0 else 0.0
+         for d, v0 in w.read_val.items()),
+        default=0.0)
 def rev_stale(w, F):
     return any(F[d].rev > s for d, s in w.read_rev.items())
 def bump(f, rng, cfg):
@@ -119,7 +123,8 @@ def _verify_hmac(w, F, secret):
     """Verify that the read-set HMAC binds to the claimed rev/value snapshot.
     Returns True if no HMAC is present (pass-through) or if HMAC matches.
     A present-but-wrong HMAC returns False — the caller rejects that write."""
-    import hmac as _hmac, hashlib
+    import hashlib
+    import hmac as _hmac
     if not w.read_hmac:
         return True
     digest = _hmac.new(secret.encode() if secret else b"",
@@ -179,7 +184,8 @@ def build(cfg, rng):
                 # staleness-predicate win from the routing/arbitration win.
                 elif cfg.policy == "occ_value":
                     f.policy, f.materiality = "occ_value", cfg.global_materiality
-                elif cfg.policy == "cascade": f.policy, f.materiality = "cascade", cfg.global_materiality
+                elif cfg.policy == "cascade":
+                    f.policy, f.materiality = "cascade", cfg.global_materiality
                 else:
                     if measured < cfg.route_threshold: f.policy = "occ"
                     else: f.policy, f.materiality = "cascade", measured
@@ -225,14 +231,17 @@ def resolve(f, grp, F, cfg, rng=None, track=None, metrics=None):
         return ResolveResult(True, len(grp) - 1, silent, "OCC_COMMIT", 0, None)
 
     m = f.materiality
-    fresh = [w for w in grp if drift(w, F) <= m]; n_stale = len(grp) - len(fresh)
+    fresh = [w for w in grp if drift(w, F) <= m]
+    n_stale = len(grp) - len(fresh)
     if not fresh:
         return ResolveResult(False, len(grp), 0, "RECOMPUTE", 0, None)
-    redo = n_stale + sum(1 for _ in range(len(fresh) - 1) if rng.random() < cfg.fresh_loser_redo_prob)
+    redo = n_stale + sum(
+        1 for _ in range(len(fresh) - 1)
+        if rng.random() < cfg.fresh_loser_redo_prob)
 
     # apply calibrated confidence to break ties (do not mutate the Write)
-    calibrated = [_effective_conf(w, track) for w in fresh]
-    bt = min(w.tier for w in fresh); top_w = [w for w in fresh if w.tier == bt]
+    bt = min(w.tier for w in fresh)
+    top_w = [w for w in fresh if w.tier == bt]
     if len(top_w) > 1:
         top_c = [_effective_conf(w, track) for w in top_w]
         bc = max(top_c); winners = [top_w[i] for i, c in enumerate(top_c)
@@ -315,7 +324,9 @@ def run(cfg, record=None):
                 m = f.materiality
                 fresh = [w for w in g if drift(w, F) <= m]
                 winner = fresh[0] if fresh else None
-                M["audit_disagreements"] = M.get("audit_disagreements", 0) + audit_disagreement(f, g, F, winner)
+                M["audit_disagreements"] = (
+                    M.get("audit_disagreements", 0)
+                    + audit_disagreement(f, g, F, winner))
             if committed:
                 M["commits"] += 1; bump(f, rng, cfg); metrics.emit("commit")
                 if silent: metrics.emit("silent_error")
@@ -350,19 +361,30 @@ def _winner_write(grp, F, f, m):
 
 def rep(label, M):
     c = M["conflicts"] or 1; cm = M["commits"] or 1
-    line = (f"  {label:<32} {M['recomputes']/c:4.2f} recompute/conflict   "
-            f"{M['recomputes']/cm:5.2f} recompute/commit   "
-            f"silent_err {M['silent_errors']:>4}   conflicts {M['conflicts']:>6}")
+    # Format arm counts as a compact breakdown so FORK/RECOMPUTE are visible
+    # at a glance (not just aggregates). Order: WINNER, FORK, RECOMPUTE, OCC_*.
+    arms = []
+    for a in ("WINNER", "FORK", "RECOMPUTE", "OCC_COMMIT", "OCC_ALLABORT"):
+        n = M.get(a, 0)
+        if n: arms.append(f"{a}={n}")
+    arm_str = "  ".join(arms) if arms else ""
+    line = (f"  {label:<32} recomp/conf {M['recomputes']/c:4.2f}   "
+            f"recomp/commit {M['recomputes']/cm:5.2f}   "
+            f"silent {M['silent_errors']:>4}   conflicts {M['conflicts']:>6}")
     if M.get("audit_checks", 0) > 0:
         ad = M["audit_disagreements"]; ac = M["audit_checks"]
-        line += f"   audit {ad}/{ac} disagree"
+        line += f"   audit {ad}/{ac}"
+    if arm_str:
+        line += f"\n{'':>35}arms: {arm_str}"
     print(line)
 
 def main():
     print("=" * 104)
-    print("POLICY HEAD-TO-HEAD (lag=4; 30% price-like tol~0.01, 70% estimate-like tol~0.25)")
+    print("POLICY HEAD-TO-HEAD  (lag=4; 30% price-like tol~0.01, 70% estimate-like tol~0.25)")
     print("=" * 104)
-    print("\n[10] pure OCC(rev)  vs  OCC(value)  vs  pure CASCADE(0.20)  vs  HYBRID(routed)")
+    print("\n  Arms:  WINNER=resolved on authority->conf  |  FORK=tie deferred to human")
+    print("         RECOMPUTE=all stale, re-run  |  OCC_COMMIT/OCC_ALLABORT=rev-predicate\n")
+    print("[10] pure OCC(rev)  vs  OCC(value)  vs  pure CASCADE(0.20)  vs  HYBRID(routed)")
     rep("pure OCC (rev-staleness)", run(Config(policy="occ")))
     rep("OCC (value-staleness 0.20)", run(Config(policy="occ_value", global_materiality=0.20)))
     rep("pure CASCADE (global 0.20)", run(Config(policy="cascade", global_materiality=0.20)))
@@ -377,11 +399,13 @@ def main():
 
     print("\n[11] survives the 'fresh loser adopts winner free' assumption being switched off?")
     for p in (0.0, 0.5, 1.0):
-        rep(f"hybrid redo_prob={p:.1f}", run(Config(policy="hybrid", fresh_loser_redo_prob=p)))
+        rep(f"hybrid redo_prob={p:.1f}",
+            run(Config(policy="hybrid", fresh_loser_redo_prob=p)))
 
-    print("\n[12] over-estimating tolerance: PURE CASCADE (bites hard) vs HYBRID (only cascade-routed fields)")
+    print("\n[12] over-estimating tolerance: PURE CASCADE vs HYBRID")
     for s in (1.0, 2.0, 5.0):
-        rep(f"cascade tol_safety={s:.0f}", run(Config(policy="cascade", global_materiality=0.20 * s)))
+        rep(f"cascade tol_safety={s:.0f}",
+            run(Config(policy="cascade", global_materiality=0.20 * s)))
     for s in (1.0, 2.0, 5.0):
         rep(f"hybrid  tol_safety={s:.0f}", run(Config(policy="hybrid", tol_safety=s)))
     print("     Measure tolerance conservatively (safety<=1) -> silent_err stays 0.")

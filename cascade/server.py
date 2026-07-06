@@ -47,12 +47,10 @@ adapters that JSON-(de)serialize and call the impls.
 Run as a stdio MCP server:  python -m cascade.server
 """
 from __future__ import annotations
+
 import json
 import math
-import os
 import random
-import sys
-from dataclasses import asdict, replace
 from typing import Any
 
 import mcp.types as types
@@ -60,7 +58,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from cascade import cascade_routing as cr
-
 
 # ----------------------------- shared state ----------------------------------
 # Module-global so the stdio server and in-process tests share one engine.
@@ -326,21 +323,22 @@ async def propose_update_impl(
     if committed:
         cr.bump(f, state.rng, cfg)
     del state.pending[field]
+    # Human-readable one-liner: what happened and why, in plain English.
+    # This is what a developer scanning MCP output reads first; the structured
+    # fields below are for programmatic consumers.
+    summary = _arm_summary(arm, committed, silent, fork_reason, n_stale,
+                           len(batch), audit_disagreement, hmac_failures=0)
     return {
         "status": "resolved", "field": field, "arm": arm,
+        "summary": summary,
         "recomputes": redo, "silent_error": silent,
         "committed": committed, "n_writers": len(batch), "n_stale": n_stale,
         "win_tier": win_tier, "top_confidence": top_conf,
-        # surface the configured materiality and which predicate cleared, so a
-        # caller can't be blind to the fact that a WINNER cleared only the
-        # loose value check (not the strict rev check).
         "predicate_passed": predicate_passed,
         "configured_materiality": f.materiality,
         "configured_true_tol": f.true_tol,
         "audit_check": audit_check, "audit_disagreement": audit_disagreement,
-        # fork_reason: None unless a tie persisted after calibration (FORK arm).
         "fork_reason": fork_reason,
-        # integrity: count of writes rejected for present-but-wrong HMAC.
         "hmac_failures": int(metrics.events.get("hmac_failure", 0)),
     }
 
@@ -351,6 +349,41 @@ async def get_field_impl(field: str) -> dict:
     return {"id": f.id, "level": f.level, "deps": f.deps, "rev": f.rev,
             "value": f.value, "true_tol": f.true_tol,
             "policy": f.policy, "materiality": f.materiality}
+
+
+_ARM_PLAIN = {
+    "WINNER":       "a write won on authority->confidence",
+    "FORK":         "ties deferred to a human (fork)",
+    "RECOMPUTE":    "all writes stale, re-run needed",
+    "OCC_COMMIT":   "OCC rev-check passed, committed",
+    "OCC_ALLABORT": "OCC rev-check failed, all aborted",
+}
+
+_FORK_REASON_PLAIN = {
+    "FORK_CONF_TIE": "confidence tie after calibration",
+    "FORK_TIER_TIE": "authority-tier tie",
+}
+
+
+def _arm_summary(arm, committed, silent, fork_reason, n_stale,
+                 n_writers, audit_disagreement, hmac_failures=0) -> str:
+    """One-line human-readable outcome for propose_update results."""
+    parts = [f"{arm}: {_ARM_PLAIN.get(arm, arm)}"]
+    if fork_reason:
+        parts.append(f"({fork_reason}: {_FORK_REASON_PLAIN.get(fork_reason, fork_reason)})")
+    if n_stale:
+        parts.append(f"{n_stale}/{n_writers} writes stale")
+    if silent:
+        parts.append("SILENT ERROR committed (drift > true_tol)")
+    if audit_disagreement:
+        parts.append(f"audit canary DISAGREED ({audit_disagreement})")
+    if hmac_failures:
+        parts.append(f"{hmac_failures} HMAC failure(s)")
+    if committed:
+        parts.append("committed")
+    else:
+        parts.append("not committed")
+    return "; ".join(parts)
 
 
 # ----------------------------- MCP server wiring -----------------------------

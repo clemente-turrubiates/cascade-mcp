@@ -22,19 +22,17 @@ synthetic charts measure.
 Run (from the repo root):  python -m tests.test_mcp_wrapper
 """
 from __future__ import annotations
+
 import asyncio
 import csv
 import json
 import os
-import random
 import subprocess
 import sys
 import time
-from dataclasses import replace
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
-from cascade import cascade_routing as cr
 from cascade import server as srv
 
 
@@ -48,7 +46,7 @@ async def stdio_smoke():
     # client so the test runs even if mcp.client isn't installed.
     try:
         from mcp.client.session import ClientSession
-        from mcp.client.stdio import stdio_client, StdioServerParameters
+        from mcp.client.stdio import StdioServerParameters, stdio_client
         have_client_sdk = True
     except ImportError:
         have_client_sdk = False
@@ -215,7 +213,6 @@ async def run_regime_through_wrapper(regime_name, regime, policy_tag, policy_mod
 
     # per-field pending: track issued_round and the writes (mirrors sim)
     pending: dict[str, list] = {}
-    pending_since: dict[str, int] = {}
 
     for r in range(rounds):
         # (a) source churn — call the wrapper's churn tool

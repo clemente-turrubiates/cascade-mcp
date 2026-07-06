@@ -28,11 +28,11 @@ staleness gate -> authority tier -> confidence -> fork-on-tie.
 """
 
 from __future__ import annotations
-import random
-from dataclasses import dataclass, field
-from collections import Counter
-from typing import Optional
 
+import random
+from collections import Counter
+from dataclasses import dataclass
+from typing import Optional
 
 # ----------------------------- data model -----------------------------------
 

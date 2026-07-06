@@ -4,7 +4,7 @@ Streams the CSV once and computes the things test_agent_logs.py does NOT check,
 specifically the angles where a rigged benchmark would hide.
 """
 import csv
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
 
 CSV = "agent_logs.csv"
 COMMITTED = {"WINNER", "FORK", "OCC_COMMIT"}

@@ -32,6 +32,12 @@ dependencies = [
     "mcp>=1.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.5",
+]
+
 [project.scripts]
 cascade-mcp = "cascade.server:cli"
 
@@ -51,3 +57,28 @@ include = [
     "LICENSE",
     "pyproject.toml",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Enable: bugs (B), imports (I), simplification (SIM), unused (F)
+select = ["E", "F", "I", "B", "SIM", "W"]
+# cascade_routing uses compact one-liner style (semicolons in dataclasses,
+# inline if/return guards) by design; E741 (ambiguous var), E701/E702
+# (multiple statements on one line) are noise against that style.
+# E402 (module import not at top) is required for test files that
+# manipulate sys.path before importing the package.
+ignore = ["E741", "E701", "E702", "E402"]
+
+[tool.ruff.lint.per-file-ignores]
+# sim/test files use longer lines and inline magic; don't fight them
+"cascade/cascade_sim.py" = ["E501"]
+"tests/*" = ["E501", "E722", "B023"]
+"scripts/*" = ["E501", "B023"]
+"tests/test_mcp_wrapper.py" = ["SIM117"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
